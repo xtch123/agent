@@ -60,3 +60,7 @@ sh install-extra.sh --upgrade
 ## 安全
 
 官方签名验证不应关闭。Fork 产物依赖于 GitHub 账户、Actions 和构建镜像的可信性；SHA256 提供文件一致性校验，不等于签名认证。对外公开 Fork 时不要把 Hub Token 提交进仓库。
+
+## 与 Windows 构建的关系
+
+Windows x64 使用独立的 [WINDOWS-EXTRA.md](WINDOWS-EXTRA.md) 和 `.github/workflows/extra-windows.yml`，产物发布为 `windows-vX.Y.Z`。Linux 额外架构继续发布 `extra-vX.Y.Z`，并保持为 GitHub 的 Latest Release，以保证本 Linux 安装器从 `releases/latest/download` 获取的仍然是 Linux 构建。两条更新线互不等待，Windows 新版本不覆盖 Linux Release。
