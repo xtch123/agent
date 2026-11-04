@@ -4,21 +4,27 @@
 
 该 Windows Agent 使用 Windows API 采集数据、Windows Service 管理后台运行；不是将 Linux 版直接交叉编译。使用之前应阅读 Windows 项目 README 和免责声明，特别是其作者注明代码由 AI 生成。
 
-## 更新策略
+## 更新策略（Linux / Windows 完全独立）
 
-- `.github/workflows/extra-linux.yml` 仍负责 ARMv7 等 Linux 架构，工作方式不变。
-- `.github/workflows/extra-windows.yml` 每天检查一次**官方 Linux Agent**和**Windows 移植项目**的最新 Release tag。
-- 仅当版本**完全一致**，且本 Fork 已经有 `extra-vX.Y.Z` Linux Release，才从 Windows 项目该 tag 源码交叉编译 Windows x64。
-- Windows 编译先执行格式、类型和 Clippy 检查，通过后才生成 `monitor-agent-x86_64-pc-windows-gnu.exe`。
-- Windows EXE **追加到同一个** `extra-vX.Y.Z` Release，不覆盖任何 Linux 二进制；原有 `SHA256SUMS` 仅增加 Windows EXE 的校验行。
-- 如果 Windows 项目更新较慢，则跳过此次 Windows 构建，**绝不假装旧 Windows Agent 与新 Linux Agent 同版本**。之后定时任务会再次检查。
-- 只创建 unsigned/非官方扩展包，**不会改变官方 Hub 的签名验证**，也不会更新/替换 Hub。
-- Windows 目前只覆盖 x64（amd64）。Windows x86 和 Windows ARM64 需要额外适配测试，不能认为已经支持。
+| 类型 | 独立上游 | 你的 GitHub Release 命名 | 更新条件 |
+|---|---|---|---|
+| Linux 附加架构（如 ARMv7） | [monitor-probe/agent](https://github.com/monitor-probe/agent) | `extra-vX.Y.Z` | 官方 Linux Agent 有新版本 |
+| Windows x64 | [Yeqingky/monitor-agent-win](https://github.com/Yeqingky/monitor-agent-win) | `windows-vX.Y.Z` | Windows 移植版有新版本 |
+
+- `.github/workflows/extra-linux.yml` 和 `.github/workflows/extra-windows.yml` 分别运行，每天各检查一次自己的上游。
+- **不要求 Linux 和 Windows 版本号相同**。例如 Linux 已更新到 `extra-v1.2.5`，Windows 还在 `windows-v1.2.3`，两个 Release 都保留。
+- Windows 构建先执行 `cargo fmt`、`cargo check`、Clippy，通过后才生成 `monitor-agent-x86_64-pc-windows-gnu.exe` 与 `SHA256SUMS`。
+- Windows Release 通过 `--latest=false` 发布，**不会夺走 Linux 的 Latest 标记**。Linux 安装器继续使用 `releases/latest/download`，仍然从 Linux Release 取文件。
+- Windows 发布失败不会阻塞 Linux，反之亦然。Windows 移植版没有更新时不会反复编译。
+- 旧 `extra-v1.2.3` 中已经附带的 Windows EXE 作为历史文件原样保留。今后的 Windows 新版本只发布到 `windows-v*`。
+- **Hub 协议兼容性要单独验证**：版本独立不代表任意不同版本组合都一定兼容。
+- 两种额外架构均是非官方、未签名构建，不改变官方 Hub 签名验证，也不会更新/替换 Hub。
+- Windows 目前只覆盖 x64（amd64），Windows x86 和 ARM64 不在当前构建范围。
 
 ## 安装 Windows 节点
 
 1. 在极简探针 Hub 后台创建一个节点，复制 Hub 的 HTTPS URL 和节点 Token。
-2. 前往 [Fork Releases](https://github.com/xtch123/agent/releases)，下载当前 `extra-vX.Y.Z` 下的 `monitor-agent-x86_64-pc-windows-gnu.exe` 和 `SHA256SUMS`。
+2. 前往 [Fork Releases](https://github.com/xtch123/agent/releases)（选择 `windows-v*`，不要通过 `releases/latest` 进入 Linux 版本），下载最新 Windows 专用 `windows-vX.Y.Z` Release 下的 `monitor-agent-x86_64-pc-windows-gnu.exe` 和 `SHA256SUMS`。
 3. 检查 SHA256（在 PowerShell 中执行 `Get-FileHash .\monitor-agent-x86_64-pc-windows-gnu.exe -Algorithm SHA256`，与 SHA256SUMS 中对应文件的值比较）。
 4. **以管理员身份**启动 PowerShell，进入下载目录后运行：
 
@@ -37,7 +43,7 @@
 
 ## 升级 Windows 节点
 
-下载 Fork Release 的新版 EXE、核对校验和，再在管理员 PowerShell 中运行：
+下载最新 `windows-vX.Y.Z` Release 的新版 EXE、核对校验和，再在管理员 PowerShell 中运行：
 
 ```powershell
 .\monitor-agent-x86_64-pc-windows-gnu.exe install
