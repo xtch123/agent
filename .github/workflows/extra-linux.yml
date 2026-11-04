@@ -1,0 +1,155 @@
+name: Extra Linux architectures
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/extra-linux.yml
+      - scripts/install-extra.sh
+  schedule:
+    - cron: '23 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extra-linux-release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.upstream.outputs.tag }}
+      build: ${{ steps.upstream.outputs.build }}
+    steps:
+      - name: Find upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo monitor-probe/agent --json tagName -q .tagName)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "extra-$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "extra-$tag already published" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Required: ARMv7 hard-float (the Alpine NAT VPS).
+          - {target: armv7-unknown-linux-musleabihf, image: armv7-musleabihf, required: 'true'}
+          # Candidates: publish only if compilation succeeds.
+          - {target: armv7-unknown-linux-musleabi, image: armv7-musleabi, required: 'false'}
+          - {target: arm-unknown-linux-musleabihf, image: arm-musleabihf, required: 'false'}
+          - {target: arm-unknown-linux-musleabi, image: arm-musleabi, required: 'false'}
+          - {target: armv5te-unknown-linux-musleabi, image: armv5te-musleabi, required: 'false'}
+          - {target: i686-unknown-linux-musl, image: i686-musl, required: 'false'}
+          - {target: i586-unknown-linux-musl, image: i586-musl, required: 'false'}
+          - {target: riscv64gc-unknown-linux-musl, image: riscv64gc-musl, required: 'false'}
+          - {target: loongarch64-unknown-linux-musl, image: loongarch64-musl, required: 'false'}
+          - {target: powerpc64le-unknown-linux-musl, image: powerpc64le-musl, required: 'false'}
+          # Experimental nightly toolchains.
+          - {target: mips-unknown-linux-musl, image: mips-musl, required: 'false'}
+          - {target: mipsel-unknown-linux-musl, image: mipsel-musl, required: 'false'}
+          - {target: mips64-unknown-linux-muslabi64, image: mips64-muslabi64, required: 'false'}
+          - {target: mips64el-unknown-linux-muslabi64, image: mips64el-muslabi64, required: 'false'}
+          - {target: s390x-unknown-linux-musl, image: s390x-musl, required: 'false'}
+          - {target: powerpc64-unknown-linux-musl, image: powerpc64-musl, required: 'false'}
+
+    steps:
+      - name: Checkout official release (not fork's potentially stale branch)
+        uses: actions/checkout@v4
+        with:
+          repository: monitor-probe/agent
+          ref: ${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - name: Verify Cargo version
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          test "v$version" = "$TAG"
+
+      - name: Cross-compile
+        id: compile
+        env:
+          TARGET: ${{ matrix.target }}
+          IMAGE: ${{ matrix.image }}
+          REQUIRED: ${{ matrix.required }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p dist
+          if docker run --rm \
+              -v "$PWD:/home/rust/src" -w /home/rust/src \
+              "ghcr.io/rust-cross/rust-musl-cross:$IMAGE" \
+              cargo build --release --locked --target "$TARGET"; then
+            cp "target/$TARGET/release/monitor-agent" "dist/monitor-agent-$TARGET"
+            chmod 755 "dist/monitor-agent-$TARGET"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "SUCCESS: $TARGET" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "UNSUPPORTED/FAILED: $TARGET" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$REQUIRED" = 'true' ]; then exit 1; fi
+          fi
+
+      - name: Upload successful build
+        if: steps.compile.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: extra-${{ matrix.target }}
+          path: dist/monitor-agent-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: extra-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify required build and make checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist/monitor-agent-armv7-unknown-linux-musleabihf
+          ( cd dist && sha256sum monitor-agent-* > SHA256SUMS )
+          ( cd dist && ls -1 monitor-agent-* ) >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish unofficial extras (unsigned)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "extra-$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Extra Linux agent builds ($TAG)" \
+            --notes "Unofficial unsigned builds of monitor-probe/agent $TAG for additional Linux architectures. Verify on actual hardware. Official Hub signature verification is unchanged." \
+            --latest
