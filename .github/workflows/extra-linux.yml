@@ -18,6 +18,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check POSIX shell syntax and help
+        run: |
+          dash -n scripts/install-extra.sh
+          bash -n scripts/install-extra.sh
+          sh scripts/install-extra.sh --help >/dev/null
+
   resolve:
     runs-on: ubuntu-latest
     outputs:
@@ -72,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout official release (not fork's potentially stale branch)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: monitor-probe/agent
           ref: ${{ needs.resolve.outputs.tag }}
@@ -121,7 +131,7 @@ jobs:
           retention-days: 7
 
   release:
-    needs: [resolve, build]
+    needs: [validate, resolve, build]
     if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
     permissions:
