@@ -1,0 +1,153 @@
+name: Extra Windows x64 agent
+
+# Independent from Linux builds: an optional Windows port must never block
+# publishing ARMv7. This workflow attaches the .exe to the SAME extra-v*
+# release and extends SHA256SUMS without replacing the Linux assets.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/extra-windows.yml
+      - WINDOWS-EXTRA.md
+  schedule:
+    - cron: '47 4 * * *'
+
+permissions:
+  contents: read
+
+# Shared with extra-linux.yml to serialize release writes.
+concurrency:
+  group: extra-linux-release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.versions.outputs.tag }}
+      build: ${{ steps.versions.outputs.build }}
+    steps:
+      - name: Match official Linux and Windows port release versions
+        id: versions
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          official="$(gh release view --repo monitor-probe/agent --json tagName -q .tagName)"
+          windows="$(gh release view --repo Yeqingky/monitor-agent-win --json tagName -q .tagName)"
+          [[ "$official" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          echo "tag=$official" >> "$GITHUB_OUTPUT"
+          if [ "$official" != "$windows" ]; then
+            echo "Windows port is at $windows; official Linux is at $official. Skipping until the port catches up." >> "$GITHUB_STEP_SUMMARY"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release="extra-$official"
+          if ! gh release view "$release" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$release is not yet published by the Linux workflow; retrying on the next schedule." >> "$GITHUB_STEP_SUMMARY"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          file="monitor-agent-x86_64-pc-windows-gnu.exe"
+          if gh release view "$release" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$file"; then
+            mkdir -p current
+            gh release download "$release" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir current
+            if grep -Eq "^[a-f0-9]{64}  $file$" current/SHA256SUMS; then
+              echo "$file is already listed in $release." >> "$GITHUB_STEP_SUMMARY"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout matched Windows port
+        uses: actions/checkout@v7
+        with:
+          repository: Yeqingky/monitor-agent-win
+          ref: ${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - name: Verify source version and licence
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          test "v$version" = "$TAG"
+          grep -qx 'license = "MIT"' Cargo.toml
+          test -s LICENSE
+
+      - name: Install GNU Windows build toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: clippy, rustfmt
+
+      - name: Check upstream Windows port
+        run: |
+          cargo fmt --all --check
+          cargo check --locked --target x86_64-pc-windows-gnu
+          cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+      - name: Build Windows x64 EXE
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target x86_64-pc-windows-gnu
+          mkdir -p dist
+          cp target/x86_64-pc-windows-gnu/release/monitor-agent.exe dist/monitor-agent-x86_64-pc-windows-gnu.exe
+          file dist/*.exe | grep -q 'PE32+'
+          test -s dist/monitor-agent-x86_64-pc-windows-gnu.exe
+          sha256sum dist/*.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extra-windows-x64
+          path: dist/monitor-agent-x86_64-pc-windows-gnu.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  attach:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: extra-windows-x64
+          path: dist
+
+      - name: Add Windows binary and extend Linux checksum manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="extra-$TAG"
+          binary="monitor-agent-x86_64-pc-windows-gnu.exe"
+          gh release download "$release" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir dist
+          test -s dist/SHA256SUMS
+          grep -q 'monitor-agent-armv7-unknown-linux-musleabihf' dist/SHA256SUMS
+          # Remove a stale Windows line, preserving all Linux hashes.
+          awk -v file="$binary" '$2 != file' dist/SHA256SUMS > dist/SHA256SUMS.new
+          (cd dist && sha256sum "$binary") >> dist/SHA256SUMS.new
+          mv dist/SHA256SUMS.new dist/SHA256SUMS
+          # A partial earlier run is repaired by rerunning this job.
+          gh release upload "$release" "dist/$binary" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$release" dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          echo "Windows x64 EXE attached to $release; Linux assets preserved." >> "$GITHUB_STEP_SUMMARY"
